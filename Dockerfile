@@ -3,17 +3,26 @@
 FROM ubuntu:24.04
 
 ARG DEBIAN_FRONTEND=noninteractive
+# true = fastest (native ISA, LTO, OpenMP, OpenBLAS)
+ARG OPTIMIZE=true
+ARG USE_PGO=off              # off | gen | use
+ARG BITNET_REF=              # optional: git ref/commit/tag to checkout
+ARG PREPARE_PRESETS=true     # prepare bitnet LUT/presets via venv
+ARG MODEL_URL="https://huggingface.co/microsoft/bitnet-b1.58-2B-4T-gguf/resolve/main/ggml-model-i2_s.gguf"
+ARG MODEL_SHA256=            # optional: sha256 of the model for verification
+
+# --- Base deps ---
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    git python3 python3-venv python3-pip \
-    curl ca-certificates \
-    build-essential cmake \
+    git curl ca-certificates \
+    python3 python3-venv python3-pip \
+    build-essential cmake pkg-config \
+    libopenblas-dev \
  && rm -rf /var/lib/apt/lists/* \
- && ln -s /usr/bin/python3 /usr/bin/python || true
+ && ln -sf /usr/bin/python3 /usr/bin/python
 
 WORKDIR /opt
 
 # --- Clone microsoft/BitNet (with submodules) ---
-ARG BITNET_REF=
 RUN git clone --recursive https://github.com/microsoft/BitNet.git \
  && if [ -n "$BITNET_REF" ]; then \
       git -C BitNet fetch --all && \
@@ -21,8 +30,7 @@ RUN git clone --recursive https://github.com/microsoft/BitNet.git \
     fi \
  && git -C BitNet submodule update --init --recursive
 
-# --- (Optional) Prepare BitNet presets/headers ---
-ARG PREPARE_PRESETS=true
+# --- (Optional) Prepare BitNet presets/headers (venv) ---
 RUN if [ "$PREPARE_PRESETS" = "true" ]; then \
       python3 -m venv /opt/bitnet-venv && \
       . /opt/bitnet-venv/bin/activate && \
@@ -31,7 +39,7 @@ RUN if [ "$PREPARE_PRESETS" = "true" ]; then \
       (python /opt/BitNet/setup_env.py -q i2_s -p || true); \
     fi
 
-# --- Make LUT/header visible where bundled llama.cpp expects it (/include) ---
+# --- Expose headers to bundled llama.cpp (/include) ---
 RUN set -eux; \
   mkdir -p /opt/BitNet/include; \
   hdr="$(find /opt/BitNet -type f -name 'bitnet-lut-kernels*.h' | head -n1 || true)"; \
@@ -41,38 +49,77 @@ RUN set -eux; \
   ln -sf /opt/BitNet/include /include || true; \
   ln -sf /opt/BitNet/src     /src     || true
 
-# --- Build bundled llama.cpp so run_inference.py can call build/bin/llama-cli ---
+# --- Build bundled llama.cpp (aggressive when OPTIMIZE=true) ---
 WORKDIR /opt/BitNet/3rdparty/llama.cpp
-RUN cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
- && cmake --build build -j "$(nproc)"
+RUN set -eux; \
+  COMMON_CFLAGS="-O3 -pipe -fno-plt"; \
+  COMMON_LDFLAGS="-Wl,-O3 -s"; \
+  if [ "$OPTIMIZE" = "true" ]; then \
+    NATIVE="-DGGML_NATIVE=ON"; \
+    BLAS="-DGGML_BLAS=ON -DGGML_BLAS_VENDOR=OpenBLAS"; \
+    OMP="-DGGML_OPENMP=ON"; \
+    CFLAGS="$COMMON_CFLAGS -flto -fuse-linker-plugin"; \
+    CXXFLAGS="$COMMON_CFLAGS -flto -fuse-linker-plugin"; \
+  else \
+    NATIVE="-DGGML_NATIVE=OFF"; \
+    BLAS="-DGGML_BLAS=OFF"; \
+    OMP="-DGGML_OPENMP=ON"; \
+    CFLAGS="$COMMON_CFLAGS"; \
+    CXXFLAGS="$COMMON_CFLAGS"; \
+  fi; \
+  if [ "$USE_PGO" = "gen" ]; then \
+    CFLAGS="$CFLAGS -fprofile-generate"; \
+    CXXFLAGS="$CXXFLAGS -fprofile-generate"; \
+  elif [ "$USE_PGO" = "use" ]; then \
+    CFLAGS="$CFLAGS -fprofile-use -fprofile-correction"; \
+    CXXFLAGS="$CXXFLAGS -fprofile-use -fprofile-correction"; \
+  fi; \
+  cmake -S . -B build \
+    -DCMAKE_BUILD_TYPE=Release \
+    $NATIVE $BLAS $OMP \
+    -DCMAKE_C_FLAGS_RELEASE="$CFLAGS" \
+    -DCMAKE_CXX_FLAGS_RELEASE="$CXXFLAGS" \
+    -DCMAKE_EXE_LINKER_FLAGS="$COMMON_LDFLAGS" ; \
+  cmake --build build -j"$(nproc)"
 
-# Link to where run_inference_server.py expects it
-RUN ln -s /opt/BitNet/3rdparty/llama.cpp/build /opt/BitNet/build || true
+# Link where run_inference_server expects it
+RUN ln -sf /opt/BitNet/3rdparty/llama.cpp/build /opt/BitNet/build || true
 
-# --- Bake the model into the image (self-contained) ---
-RUN mkdir -p /models
-ADD https://huggingface.co/microsoft/bitnet-b1.58-2B-4T-gguf/resolve/main/ggml-model-i2_s.gguf /models/ggml-model-i2_s.gguf
+# --- Bake model into image ---
+RUN set -eux; \
+  mkdir -p /models; \
+  if [ -n "$MODEL_URL" ]; then \
+    curl -L --fail --retry 3 --retry-delay 2 "$MODEL_URL" -o /tmp/model.gguf; \
+    if [ -n "$MODEL_SHA256" ]; then \
+      echo "${MODEL_SHA256}  /tmp/model.gguf" | sha256sum -c -; \
+    fi; \
+    mv /tmp/model.gguf /models/ggml-model-i2_s.gguf; \
+  fi
 
-# Environment (used by entrypoint / server)
+# --- Environment defaults ---
 ENV MODEL_PATH=/models/ggml-model-i2_s.gguf \
     HOST=0.0.0.0 \
     PORT=8080 \
-    THREADS=4 \
+    THREADS=2 \
     CTX_SIZE=2048 \
     N_PREDICT=4096 \
-    TEMPERATURE=0.8
+    TEMPERATURE=0.8 \
+    OMP_PROC_BIND=close \
+    OMP_PLACES=cores
 
-# Non-root user & workspace
-RUN useradd -m -u 10001 bitnet && mkdir -p /workspace && chown -R bitnet:bitnet /workspace /models
+# --- Non-root user & workspace ---
+RUN useradd -m -u 10001 bitnet && mkdir -p /workspace && chown -R bitnet:bitnet /workspace /models /opt/BitNet
+
+# >>> Use your entrypoint.sh <<<
+#   Place your entrypoint.sh next to this Dockerfile on Windows (CRLF likely).
+#   We normalize line endings to LF to avoid bash errors.
+USER root
+COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN sed -i 's/\r$//' /usr/local/bin/entrypoint.sh && chmod +x /usr/local/bin/entrypoint.sh
+
 USER bitnet
 WORKDIR /workspace
 
-# Entrypoint: auto-start run_inference_server.py
-COPY entrypoint.sh /usr/local/bin/entrypoint.sh
-USER root
-RUN sed -i 's/\r$//' /usr/local/bin/entrypoint.sh && chmod +x /usr/local/bin/entrypoint.sh
-USER bitnet
-
 EXPOSE 8080
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
-# no CMD — entrypoint runs the server
+
