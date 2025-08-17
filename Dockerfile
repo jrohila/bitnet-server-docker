@@ -46,27 +46,33 @@ WORKDIR /opt/BitNet/3rdparty/llama.cpp
 RUN cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
  && cmake --build build -j "$(nproc)"
 
-# Link to where run_inference.py expects it
+# Link to where run_inference_server.py expects it
 RUN ln -s /opt/BitNet/3rdparty/llama.cpp/build /opt/BitNet/build || true
 
 # --- Bake the model into the image (self-contained) ---
-# If HF changes the location or requires auth, you can host the file elsewhere.
 RUN mkdir -p /models
 ADD https://huggingface.co/microsoft/bitnet-b1.58-2B-4T-gguf/resolve/main/ggml-model-i2_s.gguf /models/ggml-model-i2_s.gguf
 
-# Environment (kept for scripts that reference it)
-ENV MODEL_PATH=/models/ggml-model-i2_s.gguf
+# Environment (used by entrypoint / server)
+ENV MODEL_PATH=/models/ggml-model-i2_s.gguf \
+    HOST=0.0.0.0 \
+    PORT=8080 \
+    THREADS=4 \
+    CTX_SIZE=2048 \
+    N_PREDICT=4096 \
+    TEMPERATURE=0.8
 
 # Non-root user & workspace
 RUN useradd -m -u 10001 bitnet && mkdir -p /workspace && chown -R bitnet:bitnet /workspace /models
 USER bitnet
 WORKDIR /workspace
 
-# Minimal entrypoint: no downloading; just exec what you pass (default: bash)
+# Entrypoint: auto-start run_inference_server.py
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 USER root
 RUN sed -i 's/\r$//' /usr/local/bin/entrypoint.sh && chmod +x /usr/local/bin/entrypoint.sh
 USER bitnet
 
+EXPOSE 8080
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
-CMD ["bash"]
+# no CMD — entrypoint runs the server
