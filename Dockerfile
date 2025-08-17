@@ -21,7 +21,7 @@ RUN git clone --recursive https://github.com/microsoft/BitNet.git \
     fi \
  && git -C BitNet submodule update --init --recursive
 
-# --- (Optional) Prepare BitNet presets/headers (safe to skip if not needed) ---
+# --- (Optional) Prepare BitNet presets/headers ---
 ARG PREPARE_PRESETS=true
 RUN if [ "$PREPARE_PRESETS" = "true" ]; then \
       python3 -m venv /opt/bitnet-venv && \
@@ -31,9 +31,7 @@ RUN if [ "$PREPARE_PRESETS" = "true" ]; then \
       (python /opt/BitNet/setup_env.py -q i2_s -p || true); \
     fi
 
-# --- Make the LUT header available where bundled llama.cpp expects it ---
-# Copy any preset/generated bitnet-lut-kernels*.h and kernel_config.ini into /opt/BitNet/include,
-# then expose them at /include via a symlink (llama.cpp build refers to /include/bitnet-lut-kernels.h).
+# --- Make LUT/header visible where bundled llama.cpp expects it (/include) ---
 RUN set -eux; \
   mkdir -p /opt/BitNet/include; \
   hdr="$(find /opt/BitNet -type f -name 'bitnet-lut-kernels*.h' | head -n1 || true)"; \
@@ -41,28 +39,30 @@ RUN set -eux; \
   if [ -n "$hdr" ]; then cp -f "$hdr" /opt/BitNet/include/bitnet-lut-kernels.h; fi; \
   if [ -n "$cfg" ]; then cp -f "$cfg" /opt/BitNet/include/kernel_config.ini; fi; \
   ln -sf /opt/BitNet/include /include || true; \
-  ln -sf /opt/BitNet/src     /src     || true; \
-  ls -l /include || true
+  ln -sf /opt/BitNet/src     /src     || true
 
-# --- Build the bundled llama.cpp (CPU) so run_inference.py can call build/bin/llama-cli ---
+# --- Build bundled llama.cpp so run_inference.py can call build/bin/llama-cli ---
 WORKDIR /opt/BitNet/3rdparty/llama.cpp
 RUN cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
  && cmake --build build -j "$(nproc)"
-WORKDIR /opt
 
-# Model convenience (used by entrypoint)
-ENV MODEL_PATH=/models/ggml-model-i2_s.gguf \
-    MODEL_URL=https://huggingface.co/microsoft/bitnet-b1.58-2B-4T-gguf/resolve/main/ggml-model-i2_s.gguf
+# Link to where run_inference.py expects it
+RUN ln -s /opt/BitNet/3rdparty/llama.cpp/build /opt/BitNet/build || true
 
-# Non-root user and workspace
-RUN useradd -m -u 10001 bitnet && mkdir -p /workspace /models && chown -R bitnet:bitnet /workspace /models
+# --- Bake the model into the image (self-contained) ---
+# If HF changes the location or requires auth, you can host the file elsewhere.
+RUN mkdir -p /models
+ADD https://huggingface.co/microsoft/bitnet-b1.58-2B-4T-gguf/resolve/main/ggml-model-i2_s.gguf /models/ggml-model-i2_s.gguf
+
+# Environment (kept for scripts that reference it)
+ENV MODEL_PATH=/models/ggml-model-i2_s.gguf
+
+# Non-root user & workspace
+RUN useradd -m -u 10001 bitnet && mkdir -p /workspace && chown -R bitnet:bitnet /workspace /models
 USER bitnet
 WORKDIR /workspace
 
-# Fix BitNet run_inference.py expecting /opt/BitNet/build
-RUN ln -s /opt/BitNet/3rdparty/llama.cpp/build /opt/BitNet/build
-
-# Entrypoint: ensure model present, then exec the passed command (default: bash)
+# Minimal entrypoint: no downloading; just exec what you pass (default: bash)
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 USER root
 RUN sed -i 's/\r$//' /usr/local/bin/entrypoint.sh && chmod +x /usr/local/bin/entrypoint.sh
