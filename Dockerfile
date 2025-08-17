@@ -85,6 +85,18 @@ RUN set -eux; \
 # Link where run_inference_server expects it
 RUN ln -sf /opt/BitNet/3rdparty/llama.cpp/build /opt/BitNet/build || true
 
+# --- Wrap llama-server to allow extra flags via $LLAMA_ARGS (no Python edit) ---
+ENV LLAMA_ARGS=
+RUN set -eux; \
+  srv="/opt/BitNet/3rdparty/llama.cpp/build/bin/llama-server"; \
+  if [ -f "$srv" ]; then \
+    mv "$srv" "${srv}.real"; \
+    printf '%s\n' '#!/usr/bin/env bash' \
+      'exec "$(dirname "$0")/llama-server.real" ${LLAMA_ARGS:-} "$@"' \
+      > "$srv"; \
+    chmod +x "$srv"; \
+  fi
+
 # --- Bake model into image ---
 RUN set -eux; \
   mkdir -p /models; \
@@ -110,9 +122,7 @@ ENV MODEL_PATH=/models/ggml-model-i2_s.gguf \
 # --- Non-root user & workspace ---
 RUN useradd -m -u 10001 bitnet && mkdir -p /workspace && chown -R bitnet:bitnet /workspace /models /opt/BitNet
 
-# >>> Use your entrypoint.sh <<<
-#   Place your entrypoint.sh next to this Dockerfile on Windows (CRLF likely).
-#   We normalize line endings to LF to avoid bash errors.
+# --- Use your entrypoint.sh (normalize CRLF -> LF) ---
 USER root
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN sed -i 's/\r$//' /usr/local/bin/entrypoint.sh && chmod +x /usr/local/bin/entrypoint.sh
@@ -122,4 +132,5 @@ WORKDIR /workspace
 
 EXPOSE 8080
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+
 
