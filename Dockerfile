@@ -85,15 +85,19 @@ RUN set -eux; \
 # Link where run_inference_server expects it
 RUN ln -sf /opt/BitNet/3rdparty/llama.cpp/build /opt/BitNet/build || true
 
-# --- Wrap llama-server to allow extra flags via $LLAMA_ARGS (no Python edit) ---
+# --- Wrap llama-server to allow default + extra flags ---
+# Default LLAMA_ARGS baked at build-time when OPTIMIZE=true, but still overridable at runtime.
 ENV LLAMA_ARGS=
 RUN set -eux; \
   srv="/opt/BitNet/3rdparty/llama.cpp/build/bin/llama-server"; \
   if [ -f "$srv" ]; then \
     mv "$srv" "${srv}.real"; \
-    printf '%s\n' '#!/usr/bin/env bash' \
-      'exec "$(dirname "$0")/llama-server.real" ${LLAMA_ARGS:-} "$@"' \
-      > "$srv"; \
+    if [ "$OPTIMIZE" = "true" ]; then DEFAULT_ARGS="--no-mmap --mlock"; else DEFAULT_ARGS=""; fi; \
+    { \
+      echo '#!/usr/bin/env bash'; \
+      echo 'set -e'; \
+      echo "exec \"\$(dirname \"\$0\")/llama-server.real\" ${DEFAULT_ARGS} \${LLAMA_ARGS:-} \"\$@\""; \
+    } > "$srv"; \
     chmod +x "$srv"; \
   fi
 
@@ -132,5 +136,3 @@ WORKDIR /workspace
 
 EXPOSE 8080
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
-
-

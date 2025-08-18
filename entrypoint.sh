@@ -1,24 +1,55 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Tunables (override with -e VAR=value on docker run)
+# Tunables (user can override at docker run)
 : "${MODEL_PATH:=/models/ggml-model-i2_s.gguf}"
 : "${HOST:=0.0.0.0}"
 : "${PORT:=8080}"
-: "${THREADS:=2}"
+: "${THREADS:=}"           # leave empty → we may auto-detect if OPTIMIZE_DEFAULT=true
 : "${CTX_SIZE:=2048}"
 : "${N_PREDICT:=4096}"
 : "${TEMPERATURE:=0.8}"
-: "${SYSTEM_PROMPT:=}"    # optional
+: "${SYSTEM_PROMPT:=}"
+: "${LLAMA_ARGS:=}"
+
+# If image was built with OPTIMIZE=true, choose fast defaults automatically
+if [ "${OPTIMIZE_DEFAULT:-false}" = "true" ]; then
+  # 1) Default extra flags if user didn’t override (pairs with your wrapper)
+  if [ -z "${LLAMA_ARGS}" ]; then
+    LLAMA_ARGS="--no-mmap --mlock"
+  fi
+
+  # 2) Auto-detect threads only if user didn’t set THREADS
+  if [ -z "${THREADS}" ]; then
+    # Try physical core count first
+    if command -v lscpu >/dev/null 2>&1; then
+      phys="$(lscpu -p=Core,Socket 2>/dev/null | grep -v '^#' | awk -F, '{print $1"-"$2}' | sort -u | wc -l || echo 0)"
+    else
+      phys=0
+    fi
+    if [ "${phys}" -gt 0 ]; then
+      THREADS="${phys}"
+    else
+      THREADS="$(nproc)"
+    fi
+  fi
+
+  # 3) Avoid oversubscription (OpenBLAS + OpenMP)
+  : "${OPENBLAS_NUM_THREADS:=1}"
+  : "${OMP_PLACES:=cores}"
+  : "${OMP_PROC_BIND:=close}"
+fi
+
+export THREADS LLAMA_ARGS OPENBLAS_NUM_THREADS OMP_PLACES OMP_PROC_BIND
 
 echo "[entrypoint] BitNet at /opt/BitNet"
 echo "[entrypoint] Model at ${MODEL_PATH}"
-echo "[entrypoint] Starting server on ${HOST}:${PORT}"
+echo "[entrypoint] Starting server on ${HOST}:${PORT} (threads=${THREADS})"
+echo "[entrypoint] OPTIMIZE_DEFAULT=${OPTIMIZE_DEFAULT:-false} LLAMA_ARGS='${LLAMA_ARGS}'"
 
 cd /opt/BitNet
 
-# Ensure run_inference_server sees the built llama-server at /opt/BitNet/build/...
-# (Your Dockerfile already creates this symlink; keeping as a safety check)
+# Ensure llama build symlink exists
 if [ ! -e /opt/BitNet/build ] && [ -d /opt/BitNet/3rdparty/llama.cpp/build ]; then
   ln -s /opt/BitNet/3rdparty/llama.cpp/build /opt/BitNet/build || true
 fi
@@ -32,9 +63,11 @@ args=(
   -n "${N_PREDICT}"
   --temperature "${TEMPERATURE}"
 )
+
 if [ -n "${SYSTEM_PROMPT}" ]; then
   args+=( -p "${SYSTEM_PROMPT}" )
 fi
 
-# Launch the server (OpenAI-compatible endpoints on /v1/*)
+# Pass-through extra server flags (the wrapper will inject LLAMA_ARGS before "$@")
 exec python /opt/BitNet/run_inference_server.py "${args[@]}"
+

@@ -1,0 +1,27 @@
+version: "3.9"
+
+services:
+  bitnet:
+    image: bitnet-server
+    container_name: bitnet-server
+    ports:
+      - "8088:8080"   # host:container
+    # Needed so --mlock can actually lock pages in RAM
+    cap_add:
+      - IPC_LOCK
+    ulimits:
+      memlock: -1
+    environment:
+      # Leave LLAMA_ARGS unset to use the image's default when OPTIMIZE=true
+      # (i.e., --no-mmap --mlock via wrapper). To disable/override, set it:
+      # LLAMA_ARGS: ""
+      # LLAMA_ARGS: "--no-mmap"     # example override
+      # THREADS: "8"                # optional override; if omitted, entrypoint auto-detects
+      CTX_SIZE: "2048"
+      N_PREDICT: "4096"
+      TEMPERATURE: "0.8"
+      OMP_PLACES: "cores"          # try "cores" with PROC_BIND close/spread
+      OMP_PROC_BIND: "close"       # try "spread" to A/B
+      OPENBLAS_NUM_THREADS: "1"    # avoid oversubscription with OpenMP
+      MODEL_PATH: "/models/ggml-model-i2_s.gguf"
+    restart: unless-stopped
