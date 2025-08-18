@@ -12,12 +12,13 @@ ARG PREPARE_PRESETS=true                # prepare bitnet LUT/presets via venv
 ARG MODEL_URL="https://huggingface.co/microsoft/bitnet-b1.58-2B-4T-gguf/resolve/main/ggml-model-i2_s.gguf"
 ARG MODEL_SHA256=                       # optional: sha256 of the model for verification
 
-# --- Base deps ---
+# --- Base deps (add jemalloc) ---
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git curl ca-certificates \
     python3 python3-venv python3-pip \
     build-essential cmake pkg-config \
     libopenblas-dev \
+    libjemalloc2 \
  && rm -rf /var/lib/apt/lists/* \
  && ln -sf /usr/bin/python3 /usr/bin/python
 
@@ -111,6 +112,7 @@ RUN set -eux; \
   fi
 
 # --- Environment defaults ---
+# (jemalloc preloaded by default; disable with: -e LD_PRELOAD="")
 ENV MODEL_PATH=/models/ggml-model-i2_s.gguf \
     HOST=0.0.0.0 \
     PORT=8080 \
@@ -119,7 +121,10 @@ ENV MODEL_PATH=/models/ggml-model-i2_s.gguf \
     N_PREDICT=4096 \
     TEMPERATURE=0.8 \
     OMP_PROC_BIND=close \
-    OMP_PLACES=cores
+    OMP_PLACES=cores \
+    LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libjemalloc.so.2 \
+    MALLOC_ARENA_MAX=2 \
+    JE_MALLOC_CONF=background_thread:true,dirty_decay_ms:5000,muzzy_decay_ms:5000
 
 # --- Non-root user & workspace ---
 RUN useradd -m -u 10001 bitnet && mkdir -p /workspace && chown -R bitnet:bitnet /workspace /models /opt/BitNet
