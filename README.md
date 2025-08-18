@@ -111,3 +111,31 @@ curl -s http://localhost:8088/v1/chat/completions \
   }
 }
 ```
+
+## Running Other Models
+
+You can run other models by specifying the `MODEL_URL` build argument during the Docker build process. For example, to run the Llama3 8B model, use the following command:
+
+```bash
+docker build -t bitnet-server:llama3-i2s \
+  --build-arg MODEL_URL="https://huggingface.co/eugenehp/Llama3-8B-1.58-100B-tokens-GGUF/resolve/main/ggml-model-i2_s.gguf"
+```
+
+### What is the Llama3 8B Model?
+
+The Llama3 8B model is a state-of-the-art large language model designed for efficient inference and high accuracy. It features:
+
+- **8 Billion Parameters**: Provides robust capabilities for natural language understanding and generation.
+- **1.58-bit Quantization**: Optimized for running on CPUs, leveraging lower precision arithmetic to reduce memory usage and improve speed.
+- **GGUF Format**: Ensures compatibility with llama.cpp and efficient memory management.
+
+This model is ideal for developers looking to deploy advanced AI capabilities on hardware with limited resources.
+
+### Important Note on Model Format
+
+The model must be in GGUF format and specifically targeting BitNet 1-bit quantization. This is because:
+
+- **GGUF Format**: Ensures compatibility with llama.cpp and efficient loading into memory.
+- **BitNet 1-bit Quantization**: Optimizes the model for lower precision arithmetic, enabling faster inference and reduced memory usage while maintaining useful accuracy.
+
+Using models that do not meet these requirements may result in incompatibility or suboptimal performance.
