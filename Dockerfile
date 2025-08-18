@@ -5,11 +5,12 @@ FROM ubuntu:24.04
 ARG DEBIAN_FRONTEND=noninteractive
 # true = fastest (native ISA, LTO, OpenMP, OpenBLAS)
 ARG OPTIMIZE=true
-ARG USE_PGO=off              # off | gen | use
-ARG BITNET_REF=              # optional: git ref/commit/tag to checkout
-ARG PREPARE_PRESETS=true     # prepare bitnet LUT/presets via venv
+ARG USE_PGO=off                         # off | gen | use
+ARG BITNET_REPO=https://github.com/jrohila/BitNet.git
+ARG BITNET_REF=v1.0.0-docker            # your stable tag (override with --build-arg if needed)
+ARG PREPARE_PRESETS=true                # prepare bitnet LUT/presets via venv
 ARG MODEL_URL="https://huggingface.co/microsoft/bitnet-b1.58-2B-4T-gguf/resolve/main/ggml-model-i2_s.gguf"
-ARG MODEL_SHA256=            # optional: sha256 of the model for verification
+ARG MODEL_SHA256=                       # optional: sha256 of the model for verification
 
 # --- Base deps ---
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -22,12 +23,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /opt
 
-# --- Clone microsoft/BitNet (with submodules) ---
-RUN git clone --recursive https://github.com/microsoft/BitNet.git \
- && if [ -n "$BITNET_REF" ]; then \
-      git -C BitNet fetch --all && \
-      git -C BitNet checkout "$BITNET_REF"; \
-    fi \
+# --- Clone BitNet from your fork/tag (with submodules) ---
+RUN git clone --recursive "$BITNET_REPO" BitNet \
+ && git -C BitNet fetch --all --tags \
+ && git -C BitNet checkout "$BITNET_REF" \
  && git -C BitNet submodule update --init --recursive
 
 # --- (Optional) Prepare BitNet presets/headers (venv) ---
@@ -86,7 +85,6 @@ RUN set -eux; \
 RUN ln -sf /opt/BitNet/3rdparty/llama.cpp/build /opt/BitNet/build || true
 
 # --- Wrap llama-server to allow default + extra flags ---
-# Default LLAMA_ARGS baked at build-time when OPTIMIZE=true, but still overridable at runtime.
 ENV LLAMA_ARGS=
 RUN set -eux; \
   srv="/opt/BitNet/3rdparty/llama.cpp/build/bin/llama-server"; \
