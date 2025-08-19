@@ -48,36 +48,62 @@ RUN set -eux; \
   [ -f /opt/BitNet/include/bitnet-lut-kernels.h ] && cp -f /opt/BitNet/include/bitnet-lut-kernels.h /opt/out/include/ || true; \
   [ -f /opt/BitNet/include/kernel_config.ini ] && cp -f /opt/BitNet/include/kernel_config.ini /opt/out/include/ || true
 
-# Build llama.cpp -> llama-server
+# === minimal patch starts: build llama.cpp with PGO, -DNDEBUG, fixed bench flags, fewer targets ===
 WORKDIR /opt/BitNet/3rdparty/llama.cpp
 RUN set -eux; \
-  COMMON_CFLAGS="-O3 -pipe -fno-plt"; \
+  COMMON_CFLAGS="-O3 -march=native -mtune=native -pipe -fno-plt -DNDEBUG"; \
   COMMON_LDFLAGS="-Wl,-O3 -s"; \
   if [ "$OPTIMIZE" = "true" ]; then \
     NATIVE="-DGGML_NATIVE=ON"; BLAS="-DGGML_BLAS=ON -DGGML_BLAS_VENDOR=OpenBLAS"; OMP="-DGGML_OPENMP=ON"; \
-    CFLAGS="$COMMON_CFLAGS -flto -fuse-linker-plugin"; CXXFLAGS="$COMMON_CFLAGS -flto -fuse-linker-plugin"; \
+    GEN_FLAGS="-flto -fuse-linker-plugin -fprofile-generate"; \
+    USE_FLAGS="-flto -fuse-linker-plugin -fprofile-use -fprofile-correction -Wno-missing-profile"; \
+    echo '[PGO] Pass 1: building with -fprofile-generate' >&2; \
+    cmake -S . -B build-pgo-gen -DCMAKE_BUILD_TYPE=Release $NATIVE $BLAS $OMP \
+      -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=ON -DLLAMA_BUILD_SERVER=ON \
+      -DCMAKE_C_FLAGS_RELEASE="$COMMON_CFLAGS $GEN_FLAGS" \
+      -DCMAKE_CXX_FLAGS_RELEASE="$COMMON_CFLAGS $GEN_FLAGS" \
+      -DCMAKE_EXE_LINKER_FLAGS="$COMMON_LDFLAGS"; \
+    cmake --build build-pgo-gen --target llama-cli llama-server -j"$(nproc)"; \
+    echo '[PGO] Exercising instrumented binary to generate profiles' >&2; \
+    (./build-pgo-gen/bin/llama-bench -m /opt/out/models/ggml-model-i2_s.gguf -pg 512,128 -b 2048 -ub 512 -t 2 -r 1 || \
+     ./build-pgo-gen/bin/llama-cli   -m /opt/out/models/ggml-model-i2_s.gguf -n 32 -p "hello" || true); \
+    PGO_COUNT="$(find build-pgo-gen -type f -name '*.gcda' | wc -l || true)"; \
+    if [ "${PGO_COUNT:-0}" -gt 0 ]; then \
+      echo "[PGO] SUCCESS: found ${PGO_COUNT} .gcda files; building with -fprofile-use" >&2; \
+      CFLAGS_USE="$COMMON_CFLAGS $USE_FLAGS"; \
+      CXXFLAGS_USE="$COMMON_CFLAGS $USE_FLAGS"; \
+    else \
+      echo "[PGO] WARNING: no profile data generated; building WITHOUT -fprofile-use (keeping -O3 -march=native -flto)" >&2; \
+      CFLAGS_USE="$COMMON_CFLAGS -flto -fuse-linker-plugin"; \
+      CXXFLAGS_USE="$COMMON_CFLAGS -flto -fuse-linker-plugin"; \
+    fi; \
+    echo '[PGO] Pass 2: final build' >&2; \
+    cmake -S . -B build -DCMAKE_BUILD_TYPE=Release $NATIVE $BLAS $OMP \
+      -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=ON -DLLAMA_BUILD_SERVER=ON \
+      -DCMAKE_C_FLAGS_RELEASE="$CFLAGS_USE" \
+      -DCMAKE_CXX_FLAGS_RELEASE="$CXXFLAGS_USE" \
+      -DCMAKE_EXE_LINKER_FLAGS="$COMMON_LDFLAGS"; \
+    cmake --build build --target llama-server -j"$(nproc)"; \
   else \
+    echo '[PGO] Disabled: OPTIMIZE=false → building without PGO' >&2; \
     NATIVE="-DGGML_NATIVE=OFF"; BLAS="-DGGML_BLAS=OFF"; OMP="-DGGML_OPENMP=ON"; \
-    CFLAGS="$COMMON_CFLAGS"; CXXFLAGS="$COMMON_CFLAGS"; \
-  fi; \
-  if [ "$USE_PGO" = "gen" ]; then \
-    CFLAGS="$CFLAGS -fprofile-generate"; CXXFLAGS="$CXXFLAGS -fprofile-generate"; \
-  elif [ "$USE_PGO" = "use" ]; then \
-    CFLAGS="$CFLAGS -fprofile-use -fprofile-correction"; CXXFLAGS="$CXXFLAGS -fprofile-use -fprofile-correction"; \
-  fi; \
-  cmake -S . -B build -DCMAKE_BUILD_TYPE=Release $NATIVE $BLAS $OMP \
-    -DCMAKE_C_FLAGS_RELEASE="$CFLAGS" \
-    -DCMAKE_CXX_FLAGS_RELEASE="$CXXFLAGS" \
-    -DCMAKE_EXE_LINKER_FLAGS="$COMMON_LDFLAGS"; \
-  cmake --build build -j"$(nproc)"
+    cmake -S . -B build -DCMAKE_BUILD_TYPE=Release $NATIVE $BLAS $OMP \
+      -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_SERVER=ON \
+      -DCMAKE_C_FLAGS_RELEASE="$COMMON_CFLAGS" \
+      -DCMAKE_CXX_FLAGS_RELEASE="$COMMON_CFLAGS" \
+      -DCMAKE_EXE_LINKER_FLAGS="$COMMON_LDFLAGS"; \
+    cmake --build build --target llama-server -j"$(nproc)"; \
+  fi
+# === minimal patch ends ===
 
 # Install server binary
 RUN install -D -m0755 build/bin/llama-server /opt/out/bin/llama-server
 
-# Collect shared libs needed at runtime (libllama.so, libggml*.so, etc.)
+# Collect shared libs needed at runtime (libllama.so, libggml*.so, etc.) and strip
 RUN set -eux; \
   mkdir -p /opt/out/lib; \
-  find build -type f -name '*.so' -exec cp -a {} /opt/out/lib/ \; || true
+  find build -type f -name '*.so' -exec cp -a {} /opt/out/lib/ \; || true; \
+  strip --strip-unneeded /opt/out/lib/*.so || true
 
 # Bake the model
 RUN set -eux; mkdir -p /opt/out/models; \
