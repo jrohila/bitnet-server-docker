@@ -5,7 +5,7 @@ set -euo pipefail
 : "${MODEL_PATH:=/models/ggml-model-i2_s.gguf}"
 : "${HOST:=0.0.0.0}"
 : "${PORT:=8080}"
-: "${THREADS:=}"           # leave empty → we may auto-detect if OPTIMIZE_DEFAULT=true
+: "${THREADS:=}"           # may be "", "auto", or a number
 : "${CTX_SIZE:=2048}"
 : "${N_PREDICT:=4096}"
 : "${TEMPERATURE:=0.8}"
@@ -40,7 +40,24 @@ if [ "${OPTIMIZE_DEFAULT:-false}" = "true" ]; then
   : "${OMP_PROC_BIND:=close}"
 fi
 
-export THREADS LLAMA_ARGS OPENBLAS_NUM_THREADS OMP_PLACES OMP_PROC_BIND
+# --- Robust thread selection even when OPTIMIZE_DEFAULT is false ---
+THREADS_RAW="${THREADS:-}"
+if [ -z "${THREADS_RAW}" ] || [ "${THREADS_RAW}" = "auto" ]; then
+  if command -v nproc >/dev/null 2>&1; then
+    THREADS_EFF="$(nproc)"
+  else
+    THREADS_EFF="$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 2)"
+  fi
+else
+  THREADS_EFF="${THREADS_RAW}"
+fi
+# Validate/clamp
+if ! [[ "${THREADS_EFF}" =~ ^[0-9]+$ ]] || [ "${THREADS_EFF}" -lt 1 ]; then
+  THREADS_EFF=1
+fi
+
+export THREADS="${THREADS_EFF}"
+export LLAMA_ARGS OPENBLAS_NUM_THREADS OMP_PLACES OMP_PROC_BIND
 
 echo "[entrypoint] BitNet at /opt/BitNet"
 echo "[entrypoint] Model at ${MODEL_PATH}"
