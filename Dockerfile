@@ -22,13 +22,13 @@ RUN git clone --recursive "https://github.com/jrohila/BitNet.git" BitNet \
  && git -C BitNet checkout "v1.0.0-docker" \
  && git -C BitNet submodule update --init --recursive
 
-# Optional Python env + helper setup (non-fatal if these fail)
+# Optional Python env (FIX: stop calling setup_env.py to avoid non-transferable binaries)
 RUN if [ "${OPTIMIZE}" = "true" ]; then \
       python3 -m venv /opt/bitnet-venv && \
       . /opt/bitnet-venv/bin/activate && \
       pip install --upgrade pip setuptools wheel && \
       pip install -r /opt/BitNet/requirements.txt || true && \
-      (python /opt/BitNet/setup_env.py -q i2_s -p || true); \
+      pip install --no-cache-dir gguf==0.17.1 || true; \
     fi
 
 # Export kernel header (if present)
@@ -95,7 +95,7 @@ RUN set -eux; \
     cmake --build build --target llama-server -j"$(nproc)"; \
   fi
 
-# --- Collect artifacts (FIX: no self-copy of /opt/out/models) ---
+# --- Collect artifacts (no self-copy of /opt/out/models) ---
 RUN mkdir -p /opt/out \
  && cp -a /opt/BitNet /opt/out/BitNet \
  && cp -a /opt/BitNet/3rdparty/llama.cpp/build /opt/out/llama-build
@@ -124,7 +124,7 @@ RUN set -eux; \
     mkdir -p /models; \
     cp -a /opt/out/models/* /models/
 
-# Ensure llama shared libs are found at runtime (no undefined-var usage)
+# Ensure llama shared libs are found at runtime
 ENV LD_LIBRARY_PATH=/opt/BitNet/3rdparty/llama.cpp/build
 
 # Defaults exposed to container users
