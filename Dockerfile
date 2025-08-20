@@ -85,12 +85,12 @@ RUN set -eux; \
       -DCMAKE_EXE_LINKER_FLAGS="${COMMON_LDFLAGS_USE}"; \
     cmake --build build --target llama-server -j"$(nproc)"; \
   else \
-    echo '[PGO] Disabled: OPTIMIZE=false → building without PGO' >&2; \
-    NATIVE="-DGGML_NATIVE=OFF"; BLAS="-DGGML_BLAS=OFF"; OMP="-DGGML_OPENMP=ON"; \
-    cmake -S . -B build -DCMAKE_BUILD_TYPE=Release $NATIVE $BLAS $OMP \
+    echo '[PGO] Disabled: OPTIMIZE=false → building lean, portable server (no PGO/BLAS/OpenMP/examples/tests)' >&2; \
+    NATIVE="-DGGML_NATIVE=OFF"; BLAS="-DGGML_BLAS=OFF"; OMP="-DGGML_OPENMP=OFF"; \
+    cmake -S . -B build -DCACHE_OVERRIDE=ON -DCMAKE_BUILD_TYPE=Release $NATIVE $BLAS $OMP \
       -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_SERVER=ON \
-      -DCMAKE_C_FLAGS_RELEASE="${COMMON_CFLAGS}" \
-      -DCMAKE_CXX_FLAGS_RELEASE="${COMMON_CFLAGS}" \
+      -DCMAKE_C_FLAGS_RELEASE="-O3 -pipe -fno-plt -DNDEBUG" \
+      -DCMAKE_CXX_FLAGS_RELEASE="-O3 -pipe -fno-plt -DNDEBUG" \
       -DCMAKE_EXE_LINKER_FLAGS="${COMMON_LDFLAGS_USE}"; \
     cmake --build build --target llama-server -j"$(nproc)"; \
   fi
@@ -107,10 +107,18 @@ FROM ubuntu:24.04 AS runtime
 ARG OPTIMIZE=true
 ENV DEBIAN_FRONTEND=noninteractive
 
+# Base runtime deps
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates python3-minimal \
-    libstdc++6 libgcc-s1 libgomp1 libopenblas0 libjemalloc2 \
+    libstdc++6 libgcc-s1 \
  && rm -rf /var/lib/apt/lists/*
+
+# Only pull heavy math/threading libs when OPTIMIZE=true
+RUN if [ "${OPTIMIZE}" = "true" ]; then \
+      apt-get update && apt-get install -y --no-install-recommends \
+        libgomp1 libopenblas0 libjemalloc2 && \
+      rm -rf /var/lib/apt/lists/*; \
+    fi
 
 RUN ln -s /usr/bin/python3 /usr/bin/python
 
@@ -122,7 +130,7 @@ RUN set -eux; \
     mv /opt/out/BitNet /opt/BitNet; \
     mv /opt/out/llama-build /opt/BitNet/3rdparty/llama.cpp/build; \
     mkdir -p /models; \
-    cp -a /opt/out/models/* /models/
+    [ -d /opt/out/models ] && cp -a /opt/out/models/* /models/ || true
 
 # Ensure llama shared libs are found at runtime
 ENV LD_LIBRARY_PATH=/opt/BitNet/3rdparty/llama.cpp/build
